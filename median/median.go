@@ -3,11 +3,13 @@ package median
 import (
 	"container/heap"
 	"math"
+	"sync"
 
 	h "example.com/stream-processor/heap"
 )
 
 type MedianCalulator struct {
+	mu    sync.RWMutex
 	lower h.MaxHeap
 	upper h.MinHeap
 	n     int
@@ -27,6 +29,9 @@ func NewMedianCalulator() *MedianCalulator {
 }
 
 func (m *MedianCalulator) Median() float64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	if m.n == 0 {
 		return math.NaN()
 	}
@@ -41,6 +46,9 @@ func (m *MedianCalulator) Median() float64 {
 }
 
 func (m *MedianCalulator) Add(x int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.n++
 
 	if m.lower.Len() == 0 {
@@ -73,6 +81,9 @@ func (m *MedianCalulator) rebalance() {
 }
 
 func (m *MedianCalulator) Count() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	return m.n
 }
 

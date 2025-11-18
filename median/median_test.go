@@ -2,7 +2,10 @@ package median_test
 
 import (
 	"math"
+	"runtime"
+	"sync"
 	"testing"
+	"time"
 
 	. "example.com/stream-processor/median"
 )
@@ -148,6 +151,113 @@ func TestRunningMedian_MonotonicDecreasing(t *testing.T) {
 		m.Add(v)
 		got := m.Median()
 		almostEqual(t, got, wantMedians[i])
+	}
+}
+
+func TestRunningMedian_ConcurrentAdds_CountMatches(t *testing.T) {
+	m := NewMedianCalulator()
+
+	numWorkers := runtime.NumCPU() * 4
+	numPerWorker := 2000
+
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+
+	for w := 0; w < numWorkers; w++ {
+		go func(workerID int) {
+			defer wg.Done()
+			base := workerID * numPerWorker
+			for i := 0; i < numPerWorker; i++ {
+				// Values are unique per (workerID, i) pair just
+				// to mix things up a bit.
+				v := base + i
+				m.Add(v)
+			}
+		}(w)
+	}
+
+	wg.Wait()
+
+	wantCount := numWorkers * numPerWorker
+	gotCount := m.Count()
+	if gotCount != wantCount {
+		t.Fatalf("concurrent adds: Count()=%d, want=%d", gotCount, wantCount)
+	}
+
+	// Just sanity-check the final median is finite.
+	median := m.Median()
+	if math.IsNaN(median) || math.IsInf(median, 0) {
+		t.Fatalf("concurrent adds: got invalid median %v", median)
+	}
+}
+
+func TestRunningMedian_ConcurrentAddAndMedian_NoPanic(t *testing.T) {
+	m := NewMedianCalulator()
+
+	numAdders := runtime.NumCPU() * 2
+	numPerAdder := 3000
+
+	var wg sync.WaitGroup
+	wg.Add(numAdders)
+
+	stopReaders := make(chan struct{})
+
+	// Reader goroutines: repeatedly call Median() and Count()
+	// while writers are active. We don't assert much here
+	// beyond "no panics / no data races" (checked via -race).
+	numReaders := runtime.NumCPU() * 2
+	for r := 0; r < numReaders; r++ {
+		go func() {
+			for {
+				select {
+				case <-stopReaders:
+					return
+				default:
+					_ = m.Count()
+					_ = m.Median()
+					// Yield to avoid completely hogging CPU.
+					runtime.Gosched()
+				}
+			}
+		}()
+	}
+
+	for w := 0; w < numAdders; w++ {
+		go func(workerID int) {
+			defer wg.Done()
+			base := workerID * numPerAdder
+			for i := 0; i < numPerAdder; i++ {
+				v := base - i // mix signs a bit
+				m.Add(v)
+			}
+		}(w)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// writers finished
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for concurrent writers to finish")
+	}
+
+	close(stopReaders)
+
+	// After everything settles, Count should equal numAdders * numPerAdder.
+	wantCount := numAdders * numPerAdder
+	gotCount := m.Count()
+	if gotCount != wantCount {
+		t.Fatalf("concurrent add+median: Count()=%d, want=%d", gotCount, wantCount)
+	}
+
+	median := m.Median()
+	if math.IsNaN(median) || math.IsInf(median, 0) {
+		t.Fatalf("concurrent add+median: got invalid median %v", median)
 	}
 }
 
